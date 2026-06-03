@@ -731,36 +731,9 @@ fn app_data_dir() -> PathBuf {
     base.join(crate::APP_NAME)
 }
 
-fn legacy_app_data_dir() -> PathBuf {
-    let base = std::env::var_os("LOCALAPPDATA")
-        .or_else(|| std::env::var_os("APPDATA"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("picview")
-}
-
-fn migrate_legacy_app_data_dir(dir: &Path) {
-    let legacy = legacy_app_data_dir();
-    if !legacy.exists() || legacy == dir {
-        return;
-    }
-    let _ = std::fs::create_dir_all(dir);
-    for name in ["thumbnails.db", "settings.txt"] {
-        let old_path = legacy.join(name);
-        let new_path = dir.join(name);
-        if old_path.exists() && !new_path.exists() {
-            if std::fs::rename(&old_path, &new_path).is_err() {
-                let _ = std::fs::copy(&old_path, &new_path);
-                let _ = std::fs::remove_file(&old_path);
-            }
-        }
-    }
-}
-
 fn app_data_file(name: &str) -> PathBuf {
     let dir = app_data_dir();
     let _ = std::fs::create_dir_all(&dir);
-    migrate_legacy_app_data_dir(&dir);
     dir.join(name)
 }
 
@@ -1635,7 +1608,7 @@ const MFP_POSITIONTYPE_100NS: windows_sys::core::GUID = windows_sys::core::GUID:
 
 // ── App ────────────────────────────────────────────────────────────────────────
 
-pub struct PicViewApp {
+pub struct AssetViewApp {
     roots: Vec<FolderNode>,
     selected_folder: Option<PathBuf>,
     view_mode: ViewMode,
@@ -1741,7 +1714,7 @@ pub struct PicViewApp {
     recent_image_labels: Vec<String>,
 }
 
-impl PicViewApp {
+impl AssetViewApp {
     pub fn new(_cc: &eframe::CreationContext, initial_file: Option<PathBuf>) -> Self {
         let (startup_tx, startup_rx) = channel();
         std::thread::spawn(move || {
@@ -4548,7 +4521,7 @@ impl PicViewApp {
 
 // ── eframe::App ────────────────────────────────────────────────────────────────
 
-impl eframe::App for PicViewApp {
+impl eframe::App for AssetViewApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         if !self.startup_ready {
             if let Some(rx) = &self.startup_rx {

@@ -3,6 +3,22 @@
 version = 4
 
 [[package]]
+name = "AssetView"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "egui",
+ "image 0.25.10",
+ "notify",
+ "raw-window-handle 0.6.2",
+ "rayon",
+ "rusqlite",
+ "walkdir",
+ "winapi",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "ab_glyph"
 version = "0.2.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1575,22 +1591,6 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
-
-[[package]]
-name = "picview"
-version = "0.1.0"
-dependencies = [
- "eframe",
- "egui",
- "image 0.25.10",
- "notify",
- "raw-window-handle 0.6.2",
- "rayon",
- "rusqlite",
- "walkdir",
- "winapi",
- "windows-sys 0.61.2",
-]
 
 [[package]]
 name = "pin-project-lite"

@@ -1,6 +1,6 @@
 # AssetView
 
-AssetView is a Rust desktop image viewer named `picview`.
+AssetView is a Rust desktop image viewer.
 
 This repository is intended to be built from a WSL2 Ubuntu environment.
 The normal workflow uses the provided `./build` script, which cross-compiles

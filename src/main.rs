@@ -148,7 +148,7 @@ fn main() -> eframe::Result<()> {
     let result = eframe::run_native(
         APP_NAME,
         options,
-        Box::new(move |cc| Box::new(app::PicViewApp::new(cc, initial_file))),
+        Box::new(move |cc| Box::new(app::AssetViewApp::new(cc, initial_file))),
     );
 
     #[cfg(windows)]

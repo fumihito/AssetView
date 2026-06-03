@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# build — Windows 向けクロスコンパイルビルドスクリプト
+# build - Windows cross-compilation build script
 # Usage:
-#   ./build                    → リリースビルド
-#   ./build debug              → デバッグビルド
-#   ./build --rebuild          → キャッシュを削除してからリリースビルド
-#   ./build debug --rebuild    → キャッシュを削除してからデバッグビルド
+#   ./build                    -> release build
+#   ./build debug              -> debug build
+#   ./build --rebuild          -> release build after clearing the local cache
+#   ./build debug --rebuild    -> debug build after clearing the local cache
 set -euo pipefail
 
 TARGET="x86_64-pc-windows-gnu"
@@ -31,33 +31,33 @@ fi
 step() { echo ""; echo "==> $*"; }
 
 # ── 1. rustup ────────────────────────────────────────────────────────────────
-# システム Rust (apt 版) にはターゲット管理機能がないため、
-# rustup が無ければユーザーホームに追加インストールする。
+# The system Rust package does not provide target management, so install
+# rustup into the user home directory if it is missing.
 [[ -f "${HOME}/.cargo/env" ]] && source "${HOME}/.cargo/env"
 
 if ! command -v rustup &>/dev/null; then
-    step "rustup をインストール中..."
+    step "Installing rustup..."
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- -y --no-modify-path
     source "${HOME}/.cargo/env"
 fi
 
-# ── 2. mingw-w64 クロスリンカー ───────────────────────────────────────────────
+# ── 2. mingw-w64 cross linker ────────────────────────────────────────────────
 if ! command -v x86_64-w64-mingw32-gcc &>/dev/null; then
-    step "gcc-mingw-w64-x86-64 をインストール中..."
+    step "Installing gcc-mingw-w64-x86-64..."
     sudo apt-get install -y gcc-mingw-w64-x86-64
 fi
 
-# ── 3. Windows 向け Rust 標準ライブラリ ──────────────────────────────────────
+# ── 3. Windows Rust standard library ────────────────────────────────────────
 if ! rustup target list --installed | grep -q "^${TARGET}"; then
-    step "Rust ターゲット ${TARGET} を追加中..."
+    step "Adding Rust target ${TARGET}..."
     rustup target add "${TARGET}"
 fi
 
-# ── 4. ビルド ─────────────────────────────────────────────────────────────────
+# ── 4. Build ──────────────────────────────────────────────────────────────────
 if [[ "${REBUILD}" == "1" ]]; then
-    step "AssetView のビルドキャッシュを削除 (依存クレートは維持)"
-    # fingerprint を消すことで cargo が自パッケージだけを再コンパイルする
+    step "Clearing the AssetView build cache (keeping dependency crates)"
+    # Removing fingerprints tells cargo to rebuild only this package.
     local_dir="target/${TARGET}/${PROFILE}"
     rm -f  "${local_dir}/AssetView.exe" "${local_dir}/AssetView.d"
     rm -f  "${local_dir}/deps/AssetView"-*.{d,exe,o} 2>/dev/null || true
