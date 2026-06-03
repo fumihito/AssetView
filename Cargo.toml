@@ -1,0 +1,28 @@
+[package]
+name = "picview"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "AssetView"
+path = "src/main.rs"
+
+[dependencies]
+eframe   = { version = "0.27", default-features = false, features = ["default_fonts", "glow"] }
+egui     = "0.27"
+image    = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
+raw-window-handle = "0.6"
+walkdir  = "2"
+notify   = "6"
+rayon    = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["shellapi", "wingdi", "winuser", "windef"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Multimedia", "Win32_Security", "Win32_Storage_Xps", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_DataExchange", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Threading", "Win32_System_Variant", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"] }
+
+[profile.release]
+opt-level   = 3
+lto         = "thin"
+codegen-units = 1
+strip       = "symbols"

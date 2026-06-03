@@ -1,0 +1,37 @@
+**Important: After editing this file, run `scripts/generate-agents-md.sh`.**
+
+# Repository Guidelines
+
+## Project Structure & Module Organization
+This is a Rust desktop app named `picview`. The entry point is [`src/main.rs`](src/main.rs); UI and app state live in [`src/app.rs`](src/app.rs). Supporting modules are split by responsibility: [`src/cache.rs`](src/cache.rs) for the SQLite thumbnail cache, [`src/loader.rs`](src/loader.rs) for background thumbnail loading, and [`src/log.rs`](src/log.rs) for crash/debug logging. Build tooling is in [`build`](build), and cross-compilation settings live in [`.cargo/config.toml`](.cargo/config.toml).
+
+## Build, Test, and Development Commands
+Use the repository build script for the normal workflow:
+
+- `./build` builds a Windows release binary at `target/x86_64-pc-windows-gnu/release/picview.exe`.
+- `./build debug` builds a debug binary in the same target tree.
+- `./build --rebuild` clears the local package cache for this crate and rebuilds.
+- `./fmt-check` runs `cargo fmt --all -- --check`.
+- `./test` runs the Rust test suite.
+- `cargo test` runs the Rust test suite directly if you want to skip the wrapper script.
+
+## Coding Style & Naming Conventions
+Follow standard Rust 2021 conventions: `snake_case` for functions and modules, `PascalCase` for types, and `SCREAMING_SNAKE_CASE` for constants. Keep modules focused and prefer small helper functions over large UI blocks. Use `cargo fmt` before committing; keep imports grouped and code idiomatic. The existing codebase uses short inline comments only where behavior is non-obvious.
+
+## Responsiveness & Latency
+Treat interaction latency as the top-level design constraint. Prefer work that is immediately visible to the user over background completeness. When a choice exists, preserve input responsiveness and window movement first, then add deferred work behind explicit idle windows or cached state.
+
+- Avoid per-frame work that scales with total media count when the user is dragging, resizing, scrolling, or typing.
+- Cache layout, ordering, and other derived UI state when possible instead of rebuilding it every frame.
+- During active interaction, skip or defer non-essential background work such as thumbnail prefetch, batch uploads, and scan housekeeping.
+- When a change affects perceived responsiveness, optimize the hot path first even if it means the background finishes later.
+- Prefer simple guards and short-circuiting over elaborate scheduling if the goal is to keep UI frames cheap.
+
+## Testing Guidelines
+There is no dedicated test framework beyond Rust’s built-in test harness. Add unit tests with `#[test]` near the code they cover, and name them after behavior, for example `loads_settings_from_disk`. Run `cargo test` for the full suite or `cargo test <name>` for one case. For UI or file-system changes, validate the app manually with representative image folders.
+
+## Commit & Pull Request Guidelines
+This repository has no prior commit history yet, so use short, imperative commit messages such as `add thumbnail cache pruning`. For pull requests, include a brief summary, the commands you ran, and screenshots or screen recordings for visible UI changes. Call out platform-specific behavior, especially anything affecting Windows builds or the `./build` script.
+
+## Security & Configuration Tips
+Thumbnail cache and settings files are stored under `%LOCALAPPDATA%\picview` on Windows, with fallback paths on other platforms. Avoid checking generated binaries, cache files, or local settings into version control.
