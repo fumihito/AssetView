@@ -930,7 +930,7 @@ fn display_label_for_path(path: &Path, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_image, is_video, scan_folder, single_image_wheel_units,
+        is_image, is_video, rgba_to_bgra_in_place, scan_folder, single_image_wheel_units,
         thumbnail_scroll_accel_multiplier, thumbnail_scroll_streak_after_decay, truncate,
         THUMBNAIL_SCROLL_ACCEL_FLAT_BUMP, THUMBNAIL_SCROLL_ACCEL_MAX,
     };
@@ -1028,6 +1028,13 @@ mod tests {
         assert_eq!(thumbnail_scroll_streak_after_decay(6, 1), 5);
         assert_eq!(thumbnail_scroll_streak_after_decay(6, 10), 1);
         assert_eq!(thumbnail_scroll_streak_after_decay(1, 10), 1);
+    }
+
+    #[test]
+    fn rgba_to_bgra_in_place_swaps_red_and_blue_channels() {
+        let mut pixels = vec![1, 2, 3, 4, 10, 20, 30, 40];
+        rgba_to_bgra_in_place(&mut pixels);
+        assert_eq!(pixels, vec![3, 2, 1, 4, 30, 20, 10, 40]);
     }
 }
 
@@ -4121,30 +4128,61 @@ impl PicViewApp {
             }
         }
 
+        #[cfg(windows)]
+        let copy_player_hwnd = if current_is_video {
+            self.single_image
+                .as_ref()
+                .and_then(|si| si.video.as_ref())
+                .map(|player| player.hwnd)
+        } else {
+            None
+        };
+        #[cfg(not(windows))]
+        let copy_player_hwnd = None;
+
+        let copy_current = |frame: &eframe::Frame| {
+            let ok = copy_current_single_image_to_clipboard(
+                frame,
+                &current_path,
+                current_is_video,
+                copy_player_hwnd,
+            );
+            crate::log::append(format!(
+                "copy {}: {}",
+                if ok { "ok" } else { "failed" },
+                current_path.display()
+            ));
+            ok
+        };
+
+        let menu_resp = ui.interact(
+            avail,
+            ui.id().with("single_image_context_menu"),
+            egui::Sense::click(),
+        );
+        menu_resp.context_menu(|ui| {
+            if ui.button("コピー").clicked() {
+                let _ = copy_current(_frame);
+                ui.close_menu();
+            }
+            if ui.button("プロパティ").clicked() {
+                let ok = open_file_properties(&current_path);
+                crate::log::append(format!(
+                    "properties {}: {}",
+                    if ok { "ok" } else { "failed" },
+                    current_path.display()
+                ));
+                ui.close_menu();
+            }
+            if ui.button("エクスプローラで開く").clicked() {
+                open_in_explorer(&current_path);
+                crate::log::append(format!("open in explorer: {}", current_path.display()));
+                ui.close_menu();
+            }
+        });
+
         if key_copy {
-            #[cfg(windows)]
-            {
-                let player_hwnd = self
-                    .single_image
-                    .as_ref()
-                    .and_then(|si| si.video.as_ref())
-                    .map(|player| player.hwnd);
-                let _ = copy_current_single_image_to_clipboard(
-                    _frame,
-                    &current_path,
-                    current_is_video,
-                    player_hwnd,
-                );
-            }
-            #[cfg(not(windows))]
-            {
-                let _ = copy_current_single_image_to_clipboard(
-                    _frame,
-                    &current_path,
-                    current_is_video,
-                    None,
-                );
-            }
+            let _ = copy_current(_frame);
         }
 
         // サムネイル帯は別 viewport で表示する。
@@ -5140,6 +5178,32 @@ fn open_in_explorer(path: &Path) {
     }
 }
 
+#[cfg(windows)]
+fn open_file_properties(path: &Path) -> bool {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+
+    let verb: Vec<u16> = OsStr::new("properties").encode_wide().chain([0]).collect();
+    let path_w: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    let rc = unsafe {
+        ShellExecuteW(
+            core::ptr::null_mut(),
+            verb.as_ptr(),
+            path_w.as_ptr(),
+            core::ptr::null(),
+            core::ptr::null(),
+            windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOW,
+        )
+    } as isize;
+    rc > 32
+}
+
+#[cfg(not(windows))]
+fn open_file_properties(_path: &Path) -> bool {
+    false
+}
+
 fn load_full_res(path: &Path, ctx: &egui::Context) -> Option<egui::TextureHandle> {
     let img = image::open(path).ok()?;
     let rgba = img.to_rgba8();
@@ -5149,6 +5213,12 @@ fn load_full_res(path: &Path, ctx: &egui::Context) -> Option<egui::TextureHandle
         egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba.into_raw()),
         egui::TextureOptions::default(),
     ))
+}
+
+fn rgba_to_bgra_in_place(pixels: &mut [u8]) {
+    for px in pixels.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
 }
 
 #[cfg(windows)]
@@ -5161,63 +5231,144 @@ fn copy_rgba_to_clipboard(
     use std::mem;
     use std::ptr::copy_nonoverlapping;
     use windows_sys::Win32::Foundation::{GlobalFree, HANDLE};
-    use windows_sys::Win32::Graphics::Gdi::{BITMAPV5HEADER, BI_BITFIELDS};
+    use windows_sys::Win32::Graphics::Gdi::{
+        CreateDIBitmap, DeleteObject, GetDC, ReleaseDC, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+        CBM_INIT, DIB_RGB_COLORS,
+    };
     use windows_sys::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
     };
     use windows_sys::Win32::System::Memory::{
         GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE, GMEM_ZEROINIT,
     };
-    use windows_sys::Win32::System::Ole::CF_DIBV5;
+    use windows_sys::Win32::System::Ole::{CF_BITMAP, CF_DIB, CF_DIBV5};
 
     if rgba.len() != width as usize * height as usize * 4 {
         return false;
     }
 
-    let mut header: BITMAPV5HEADER = unsafe { mem::zeroed() };
-    header.bV5Size = mem::size_of::<BITMAPV5HEADER>() as u32;
-    header.bV5Width = width as i32;
-    header.bV5Height = -(height as i32);
-    header.bV5Planes = 1;
-    header.bV5BitCount = 32;
-    header.bV5Compression = BI_BITFIELDS;
-    header.bV5RedMask = 0x00FF_0000;
-    header.bV5GreenMask = 0x0000_FF00;
-    header.bV5BlueMask = 0x0000_00FF;
-    header.bV5AlphaMask = 0xFF00_0000;
+    let mut pixels = rgba.to_vec();
+    rgba_to_bgra_in_place(&mut pixels);
 
-    let payload_size = mem::size_of::<BITMAPV5HEADER>() + rgba.len();
-    let hglobal = unsafe { GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, payload_size) };
-    if hglobal.is_null() {
+    let mut bmi: BITMAPINFO = unsafe { mem::zeroed() };
+    bmi.bmiHeader.biSize = mem::size_of::<BITMAPINFOHEADER>() as u32;
+    bmi.bmiHeader.biWidth = width as i32;
+    bmi.bmiHeader.biHeight = -(height as i32);
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    let screen_dc = unsafe { GetDC(owner_hwnd) };
+    if screen_dc.is_null() {
+        return false;
+    }
+    let hbm = unsafe {
+        CreateDIBitmap(
+            screen_dc,
+            &bmi.bmiHeader as *const BITMAPINFOHEADER,
+            CBM_INIT as u32,
+            pixels.as_ptr() as *const core::ffi::c_void,
+            &bmi as *const BITMAPINFO,
+            DIB_RGB_COLORS,
+        )
+    };
+    unsafe {
+        let _ = ReleaseDC(owner_hwnd, screen_dc);
+    }
+    if hbm.is_null() {
         return false;
     }
 
-    let ptr = unsafe { GlobalLock(hglobal) };
-    if ptr.is_null() {
+    let mut dib_header: BITMAPINFOHEADER = unsafe { mem::zeroed() };
+    dib_header.biSize = mem::size_of::<BITMAPINFOHEADER>() as u32;
+    dib_header.biWidth = width as i32;
+    dib_header.biHeight = -(height as i32);
+    dib_header.biPlanes = 1;
+    dib_header.biBitCount = 32;
+    dib_header.biCompression = BI_RGB;
+
+    let dib_payload_size = mem::size_of::<BITMAPINFOHEADER>() + pixels.len();
+    let hglobal = unsafe { GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, dib_payload_size) };
+    if hglobal.is_null() {
+        unsafe {
+            let _ = DeleteObject(hbm as _);
+        }
+        return false;
+    }
+
+    let dib_ptr = unsafe { GlobalLock(hglobal) };
+    if dib_ptr.is_null() {
         unsafe {
             let _ = GlobalFree(hglobal);
+            let _ = DeleteObject(hbm as _);
         }
         return false;
     }
 
     unsafe {
         copy_nonoverlapping(
-            &header as *const BITMAPV5HEADER as *const u8,
-            ptr as *mut u8,
-            mem::size_of::<BITMAPV5HEADER>(),
+            &dib_header as *const BITMAPINFOHEADER as *const u8,
+            dib_ptr as *mut u8,
+            mem::size_of::<BITMAPINFOHEADER>(),
         );
         copy_nonoverlapping(
-            rgba.as_ptr(),
-            (ptr as *mut u8).add(mem::size_of::<BITMAPV5HEADER>()),
-            rgba.len(),
+            pixels.as_ptr(),
+            (dib_ptr as *mut u8).add(mem::size_of::<BITMAPINFOHEADER>()),
+            pixels.len(),
         );
         GlobalUnlock(hglobal);
+    }
+
+    let mut dibv5_header: windows_sys::Win32::Graphics::Gdi::BITMAPV5HEADER =
+        unsafe { mem::zeroed() };
+    let dibv5_header_size = mem::size_of::<windows_sys::Win32::Graphics::Gdi::BITMAPV5HEADER>();
+    dibv5_header.bV5Size = dibv5_header_size as u32;
+    dibv5_header.bV5Width = width as i32;
+    dibv5_header.bV5Height = -(height as i32);
+    dibv5_header.bV5Planes = 1;
+    dibv5_header.bV5BitCount = 32;
+    dibv5_header.bV5Compression = windows_sys::Win32::Graphics::Gdi::BI_BITFIELDS;
+    dibv5_header.bV5RedMask = 0x00FF_0000;
+    dibv5_header.bV5GreenMask = 0x0000_FF00;
+    dibv5_header.bV5BlueMask = 0x0000_00FF;
+    dibv5_header.bV5AlphaMask = 0xFF00_0000;
+
+    let dibv5_payload_size =
+        mem::size_of::<windows_sys::Win32::Graphics::Gdi::BITMAPV5HEADER>() + pixels.len();
+    let hglobal_v5 = unsafe { GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, dibv5_payload_size) };
+    let mut dibv5_ptr = core::ptr::null_mut();
+    if !hglobal_v5.is_null() {
+        dibv5_ptr = unsafe { GlobalLock(hglobal_v5) };
+        if dibv5_ptr.is_null() {
+            unsafe {
+                let _ = GlobalFree(hglobal_v5);
+            }
+        } else {
+            unsafe {
+                copy_nonoverlapping(
+                    &dibv5_header as *const windows_sys::Win32::Graphics::Gdi::BITMAPV5HEADER
+                        as *const u8,
+                    dibv5_ptr as *mut u8,
+                    dibv5_header_size,
+                );
+                copy_nonoverlapping(
+                    pixels.as_ptr(),
+                    (dibv5_ptr as *mut u8).add(dibv5_header_size),
+                    pixels.len(),
+                );
+                GlobalUnlock(hglobal_v5);
+            }
+        }
     }
 
     let opened = unsafe { OpenClipboard(owner_hwnd) } != 0;
     if !opened {
         unsafe {
             let _ = GlobalFree(hglobal);
+            if !hglobal_v5.is_null() && !dibv5_ptr.is_null() {
+                let _ = GlobalFree(hglobal_v5);
+            }
+            let _ = DeleteObject(hbm as _);
         }
         return false;
     }
@@ -5225,15 +5376,38 @@ fn copy_rgba_to_clipboard(
     let mut ok = false;
     unsafe {
         if EmptyClipboard() != 0 {
-            let set = SetClipboardData(CF_DIBV5 as u32, hglobal as HANDLE);
+            let dib_set = SetClipboardData(CF_DIB as u32, hglobal as HANDLE);
+            if dib_set.is_null() {
+                let _ = GlobalFree(hglobal);
+            } else {
+                ok = true;
+            }
+
+            if !hglobal_v5.is_null() && !dibv5_ptr.is_null() {
+                let dibv5_set = SetClipboardData(CF_DIBV5 as u32, hglobal_v5 as HANDLE);
+                if dibv5_set.is_null() {
+                    let _ = GlobalFree(hglobal_v5);
+                } else {
+                    ok = true;
+                }
+            } else if !hglobal_v5.is_null() {
+                let _ = GlobalFree(hglobal_v5);
+            }
+
+            let set = SetClipboardData(CF_BITMAP as u32, hbm as HANDLE);
             if !set.is_null() {
                 ok = true;
             } else {
-                let _ = GlobalFree(hglobal);
+                let _ = DeleteObject(hbm as _);
             }
         } else {
             let _ = GlobalFree(hglobal);
+            if !hglobal_v5.is_null() && !dibv5_ptr.is_null() {
+                let _ = GlobalFree(hglobal_v5);
+            }
+            let _ = DeleteObject(hbm as _);
         }
+
         let _ = CloseClipboard();
     }
     ok
