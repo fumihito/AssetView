@@ -15,8 +15,8 @@ Use the repository build script for the normal workflow:
 - `./build` builds a Windows release binary at `target/x86_64-pc-windows-gnu/release/AssetView.exe`.
 - `./build debug` builds a debug binary in the same target tree.
 - `./build --rebuild` clears the local package cache for this crate and rebuilds.
-- `./fmt-check` runs `cargo fmt --all -- --check`.
-- `./test` runs the Rust test suite.
+- `./utils/check` runs the repository's validation scripts, including `cargo fmt --all -- --check`.
+- `./tests/cargo-test.test` runs the Rust test suite.
 - `cargo test` runs the Rust test suite directly if you want to skip the wrapper script.
 
 ## Coding Style & Naming Conventions

@@ -52,7 +52,7 @@ The debug binary is written to:
 Run the Rust test suite with:
 
 ```bash
-./test
+./tests/cargo-test.test
 ```
 
 You can also run Cargo directly:
@@ -60,6 +60,16 @@ You can also run Cargo directly:
 ```bash
 cargo test
 ```
+
+## Checks
+
+For the repository's broader validation pass, run:
+
+```bash
+./utils/check
+```
+
+This script is intended to bundle the project's local checks into one command.
 
 ## Notes
 

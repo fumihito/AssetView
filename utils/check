@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+case "$(basename "$_SCRIPT_DIR")" in
+  utils) _PROJ_ROOT="$(dirname "$_SCRIPT_DIR")" ;;
+  *)     _PROJ_ROOT="$_SCRIPT_DIR" ;;
+esac
+
+check_start=$(date +%s%3N)
+max_elapsed_ms="${CHECK_MAX_ELAPSED_MS:-1800}"  # AI, DO NOT CHANGE THIS VALUE without explicit permits!!!
+warn_elapsed_percent=70
+SCRIPTS_DIR="${_PROJ_ROOT}/tests"
+
+FULL=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --full) FULL=1; shift ;;
+    --quick) FULL=0; shift ;;
+    *) echo "ERROR: unknown option: $1" >&2; exit 1 ;;
+  esac
+done
+
+if [[ "$FULL" -eq 1 ]]; then
+  max_elapsed_ms=$(( max_elapsed_ms * 3 ))
+fi
+warn_elapsed_ms=$(( max_elapsed_ms * warn_elapsed_percent / 100 ))
+
+# Collect test scripts.
+# Quick mode (default): exclude *.slow.test files.
+# Full mode (--full):   include all *.test files.
+if [[ "$FULL" -eq 1 ]]; then
+  mapfile -t tests < <(find "$SCRIPTS_DIR" -maxdepth 1 -name '*.test' -type f 2>/dev/null | sort)
+else
+  mapfile -t tests < <(find "$SCRIPTS_DIR" -maxdepth 1 -name '*.test' ! -name '*.slow.test' \( -type f -o -type l \) 2>/dev/null | sort)
+fi
+
+if [[ ${#tests[@]} -eq 0 ]]; then
+  echo "No tests found in ${SCRIPTS_DIR}"
+  exit 0
+fi
+
+mode_label="quick"
+[[ "$FULL" -eq 1 ]] && mode_label="full"
+echo "Running ${#tests[@]} test(s) in parallel... [mode: ${mode_label}]"
+
+# Temporary directory for per-test result files
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+
+pids=()
+for test in "${tests[@]}"; do
+  result_file="$tmpdir/$(basename "$test").result"
+  (
+    start=$(date +%s%3N)
+    if bash "$test" > "$tmpdir/$(basename "$test").log" 2>&1; then
+      status=PASS
+    else
+      status=FAIL
+    fi
+    end=$(date +%s%3N)
+    elapsed=$(( end - start ))
+    printf '%s %s %d\n' "$status" "$test" "$elapsed" > "$result_file"
+  ) &
+  pids+=($!)
+done
+
+# Wait for all background jobs
+for pid in "${pids[@]}"; do
+  wait "$pid" || true
+done
+
+# Color codes
+COLOR_PASS=$'\e[100;34m'  # bg=grey, fg=blue
+COLOR_FAIL=$'\e[43;31m'   # bg=darkyellow, fg=red
+COLOR_RESET=$'\e[0m'
+
+# Collect and display results
+passed=0
+failed=0
+budget_watch_names=()
+budget_watch_elapsed=()
+for test in "${tests[@]}"; do
+  result_file="$tmpdir/$(basename "$test").result"
+  read -r status name elapsed < "$result_file"
+  if [[ $status == PASS ]]; then
+    color=$COLOR_PASS
+  else
+    color=$COLOR_FAIL
+  fi
+  printf '  [%s%s%s] %s  (%dms)\n' "$color" "$status" "$COLOR_RESET" "$name" "$elapsed"
+  if [[ $status == PASS ]]; then
+    (( passed++ )) || true
+  else
+    (( failed++ )) || true
+  fi
+  if [[ "$elapsed" -gt "$warn_elapsed_ms" ]]; then
+    budget_watch_names+=("$name")
+    budget_watch_elapsed+=("$elapsed")
+  fi
+done
+
+echo ""
+echo "Results: ${passed} passed, ${failed} failed"
+if [[ "${#budget_watch_names[@]}" -gt 0 ]]; then
+  echo "Budget watch: ${#budget_watch_names[@]} test(s) exceeded ${warn_elapsed_percent}% of ${max_elapsed_ms}ms (${warn_elapsed_ms}ms):"
+  for idx in "${!budget_watch_names[@]}"; do
+    printf '  - %s  (%dms)\n' "${budget_watch_names[$idx]}" "${budget_watch_elapsed[$idx]}"
+  done
+fi
+
+check_end=$(date +%s%3N)
+check_elapsed=$(( check_end - check_start ))
+echo "Elapsed: ${check_elapsed}ms (budget: <= ${max_elapsed_ms}ms)"
+
+budget_failed=0
+if [[ "${check_elapsed}" -gt "${max_elapsed_ms}" ]]; then
+  echo "FAIL: check took ${check_elapsed}ms; expected <= ${max_elapsed_ms}ms." >&2
+  budget_failed=1
+fi
+
+[[ $failed -eq 0 && $budget_failed -eq 0 ]]
