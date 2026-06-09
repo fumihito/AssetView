@@ -573,6 +573,27 @@ fn format_timecode(secs: f32) -> String {
     }
 }
 
+fn consume_copy_shortcut(ctx: &egui::Context) -> bool {
+    ctx.input_mut(|i| {
+        if let Some(pos) = i
+            .events
+            .iter()
+            .position(|event| matches!(event, egui::Event::Copy))
+        {
+            i.events.remove(pos);
+            return true;
+        }
+
+        i.consume_shortcut(&egui::KeyboardShortcut::new(
+            egui::Modifiers::COMMAND,
+            egui::Key::C,
+        )) || i.consume_shortcut(&egui::KeyboardShortcut::new(
+            egui::Modifiers::CTRL,
+            egui::Key::C,
+        ))
+    })
+}
+
 #[cfg(windows)]
 fn hwnd_from_frame(frame: &eframe::Frame) -> Option<windows_sys::Win32::Foundation::HWND> {
     use windows_sys::Win32::Foundation::HWND;
@@ -3763,7 +3784,7 @@ impl AssetViewApp {
 
         // Keyboard / wheel navigation
         let key_esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
-        let key_copy = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::C));
+        let key_copy = consume_copy_shortcut(ctx);
         let key_left = ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft));
         let key_right = ctx.input(|i| i.key_pressed(egui::Key::ArrowRight));
         let key_f5 = ctx.input(|i| i.key_pressed(egui::Key::F5));
@@ -4161,7 +4182,7 @@ impl AssetViewApp {
         // サムネイル帯は別 viewport で表示する。
     }
 
-    fn show_single_image_strip_viewport(&mut self, ctx: &egui::Context) {
+    fn show_single_image_strip_viewport(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let current = match self.single_image.as_ref() {
             Some(si) => si.index,
             None => return,
@@ -4171,6 +4192,8 @@ impl AssetViewApp {
         if images.is_empty() || current >= images.len() {
             return;
         }
+        let current_path = images[current].clone();
+        let current_is_video = is_video(&current_path);
 
         let strip_indices: [usize; 7] = std::array::from_fn(|i| {
             let offset = i as i64 - FILMSTRIP_RADIUS;
@@ -4220,6 +4243,33 @@ impl AssetViewApp {
                         close_single_image = true;
                         return;
                     }
+                    let key_copy = consume_copy_shortcut(ctx);
+                    #[cfg(windows)]
+                    let copy_player_hwnd = if current_is_video {
+                        self.single_image
+                            .as_ref()
+                            .and_then(|si| si.video.as_ref())
+                            .map(|player| player.hwnd)
+                    } else {
+                        None
+                    };
+                    #[cfg(not(windows))]
+                    let copy_player_hwnd = None;
+                    let copy_current = |frame: &eframe::Frame| {
+                        let ok = copy_current_single_image_to_clipboard(
+                            frame,
+                            &current_path,
+                            current_is_video,
+                            copy_player_hwnd,
+                        );
+                        crate::log::append(format!(
+                            "copy {}: {}",
+                            if ok { "ok" } else { "failed" },
+                            current_path.display()
+                        ));
+                        ok
+                    };
+
                     navigate_to = draw_single_image_filmstrip(
                         ui,
                         &self.all_image_labels_short18,
@@ -4228,6 +4278,10 @@ impl AssetViewApp {
                         current,
                         &self.theme,
                     );
+
+                    if key_copy {
+                        let _ = copy_current(frame);
+                    }
                 });
         });
 
@@ -4586,7 +4640,7 @@ impl eframe::App for AssetViewApp {
                 .show(ctx, |ui| {
                     self.show_single_image(ui, ctx, frame);
                 });
-            self.show_single_image_strip_viewport(ctx);
+            self.show_single_image_strip_viewport(ctx, frame);
         } else {
             // Ctrl+Scroll → zoom with inertia.
             // Consume events so the inner ScrollArea doesn't also scroll.
