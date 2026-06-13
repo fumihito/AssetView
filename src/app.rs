@@ -33,7 +33,9 @@ const FADE_SECS: f32 = 0.4;
 const TILE_BASE_PX: f32 = 150.0;
 
 /// Number of frames shown on each side of the current image in the filmstrip.
-const FILMSTRIP_RADIUS: i64 = 3;
+const FILMSTRIP_RADIUS: i64 = 5;
+/// Total thumbnails rendered in the filmstrip.
+const FILMSTRIP_COUNT: usize = (FILMSTRIP_RADIUS * 2 + 1) as usize;
 /// Thumbnail display size inside the filmstrip strip.
 const FILMSTRIP_THUMB_PX: f32 = 72.0;
 /// Total height of the filmstrip panel (thumb + top/bottom padding).
@@ -560,6 +562,11 @@ fn fade_ease(t: f32) -> f32 {
     t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
 }
 
+fn filmstrip_selection_ease(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
+}
+
 #[cfg_attr(not(windows), allow(dead_code))]
 fn format_timecode(secs: f32) -> String {
     let total = secs.max(0.0).round() as i64;
@@ -667,9 +674,11 @@ fn filmstrip_viewport_id() -> egui::ViewportId {
 fn draw_single_image_filmstrip(
     ui: &mut Ui,
     labels_short18: &[String],
-    strip_indices: &[usize; 7],
-    strip_textures: &[Option<&egui::TextureHandle>; 7],
+    strip_indices: &[usize; FILMSTRIP_COUNT],
+    strip_textures: &[Option<&egui::TextureHandle>; FILMSTRIP_COUNT],
     current_index: usize,
+    previous_index: Option<usize>,
+    selection_t: f32,
     theme: &ThemePalette,
 ) -> Option<usize> {
     let gap = 4.0_f32;
@@ -708,14 +717,39 @@ fn draw_single_image_filmstrip(
             navigate_to = Some(image_index);
         }
 
+        let selection_strength = if is_current {
+            selection_t
+        } else if previous_index == Some(image_index) {
+            (1.0 - selection_t).max(0.0)
+        } else {
+            0.0
+        };
+        let focus_scale = if is_current {
+            0.94 + 0.06 * selection_strength
+        } else if previous_index == Some(image_index) {
+            1.0 - 0.06 * selection_t
+        } else {
+            1.0
+        };
+        let focus_rect =
+            egui::Rect::from_center_size(item_rect.center(), item_rect.size() * focus_scale);
+
         ui.painter()
             .rect_filled(item_rect, 2.0, egui::Color32::from_gray(25));
         if let Some(tex) = tex_opt {
-            draw_centered(ui, tex, item_rect);
+            draw_centered(ui, tex, focus_rect);
         }
-        if is_current {
+        if selection_strength > 0.0 {
+            let alpha = (selection_strength.clamp(0.0, 1.0) * 255.0).round() as u8;
+            let border_color = egui::Color32::from_rgba_unmultiplied(
+                theme.accent_border.r(),
+                theme.accent_border.g(),
+                theme.accent_border.b(),
+                alpha,
+            );
+            let stroke_w = 1.5 + 0.7 * selection_strength;
             ui.painter()
-                .rect_stroke(item_rect, 2.0, egui::Stroke::new(2.0, theme.accent_border));
+                .rect_stroke(focus_rect, 2.0, egui::Stroke::new(stroke_w, border_color));
         } else if resp.hovered() {
             ui.painter()
                 .rect_stroke(item_rect, 2.0, egui::Stroke::new(1.0, theme.accent_hover));
@@ -1261,6 +1295,25 @@ impl SingleImage {
     }
 }
 
+struct FilmstripSelectionAnim {
+    from_index: usize,
+    to_index: usize,
+    started_at: Instant,
+}
+
+impl FilmstripSelectionAnim {
+    const DURATION_SECS: f32 = 0.16;
+
+    fn progress(&self) -> f32 {
+        let raw = self.started_at.elapsed().as_secs_f32() / Self::DURATION_SECS;
+        filmstrip_selection_ease(raw)
+    }
+
+    fn finished(&self) -> bool {
+        self.started_at.elapsed().as_secs_f32() >= Self::DURATION_SECS
+    }
+}
+
 #[cfg(windows)]
 #[derive(Clone, Debug)]
 struct VideoUiState {
@@ -1690,6 +1743,12 @@ pub struct AssetViewApp {
     si_scroll_accum: f32,
     /// Accumulated scroll delta for slideshow prev/next inertia.
     ss_scroll_accum: f32,
+    /// Tracks whether the root viewport was focused on the previous frame.
+    root_viewport_focused: bool,
+    /// Small motion cue for the filmstrip selection frame and thumbnail scale.
+    filmstrip_selection_anim: Option<FilmstripSelectionAnim>,
+    /// Last selected image index shown in the filmstrip viewport.
+    filmstrip_selection_last_index: Option<usize>,
     /// Current thumbnail-cache request generation.
     thumbnail_generation: u64,
     /// Last visible-range bucket used to refresh thumbnail prefetch priority.
@@ -1845,6 +1904,9 @@ impl AssetViewApp {
             theme: ThemePalette::default(),
             si_scroll_accum: 0.0,
             ss_scroll_accum: 0.0,
+            root_viewport_focused: false,
+            filmstrip_selection_anim: None,
+            filmstrip_selection_last_index: None,
             thumbnail_generation: 0,
             thumbnail_viewport_signature: None,
             thumbnail_cache_total: 0,
@@ -4188,24 +4250,69 @@ impl AssetViewApp {
             None => return,
         };
 
-        let images = self.all_images();
-        if images.is_empty() || current >= images.len() {
+        let image_count = self.all_images().len();
+        if image_count == 0 || current >= image_count {
             return;
         }
-        let current_path = images[current].clone();
-        let current_is_video = is_video(&current_path);
 
-        let strip_indices: [usize; 7] = std::array::from_fn(|i| {
-            let offset = i as i64 - FILMSTRIP_RADIUS;
-            ((current as i64 + offset).rem_euclid(images.len() as i64)) as usize
-        });
-        let strip_textures: [Option<&egui::TextureHandle>; 7] = std::array::from_fn(|i| {
-            let image_index = strip_indices[i];
-            match self.thumbnails.get(&images[image_index]) {
-                Some(ThumbState::Ready(tex)) => Some(tex),
-                _ => None,
+        let mut selection_anim = self.filmstrip_selection_anim.take();
+        match selection_anim.as_ref() {
+            Some(anim) if anim.to_index != current => {
+                let from_index = self
+                    .filmstrip_selection_last_index
+                    .unwrap_or(anim.to_index)
+                    .min(image_count.saturating_sub(1));
+                selection_anim = Some(FilmstripSelectionAnim {
+                    from_index,
+                    to_index: current,
+                    started_at: Instant::now(),
+                });
             }
+            None => {
+                if self.filmstrip_selection_last_index != Some(current) {
+                    let from_index = self
+                        .filmstrip_selection_last_index
+                        .unwrap_or(current)
+                        .min(image_count.saturating_sub(1));
+                    if from_index != current {
+                        selection_anim = Some(FilmstripSelectionAnim {
+                            from_index,
+                            to_index: current,
+                            started_at: Instant::now(),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+        let selection_t = selection_anim
+            .as_ref()
+            .map(|anim| anim.progress())
+            .unwrap_or(1.0);
+        let previous_index = selection_anim.as_ref().map(|anim| anim.from_index);
+        let mut selection_anim_needs_repaint =
+            selection_anim.as_ref().is_some_and(|anim| !anim.finished());
+        let images = self.all_images();
+        let prev_index = if current == 0 {
+            image_count - 1
+        } else {
+            current - 1
+        };
+        let next_index = (current + 1) % image_count;
+        let mut si_scroll_accum = self.si_scroll_accum;
+
+        let strip_indices: [usize; FILMSTRIP_COUNT] = std::array::from_fn(|i| {
+            let offset = i as i64 - FILMSTRIP_RADIUS;
+            ((current as i64 + offset).rem_euclid(image_count as i64)) as usize
         });
+        let strip_textures: [Option<&egui::TextureHandle>; FILMSTRIP_COUNT] =
+            std::array::from_fn(|i| {
+                let image_index = strip_indices[i];
+                match self.thumbnails.get(&images[image_index]) {
+                    Some(ThumbState::Ready(tex)) => Some(tex),
+                    _ => None,
+                }
+            });
         let strip_count = strip_indices.len();
 
         let parent_rect = ctx.input(|i| i.viewport().outer_rect);
@@ -4222,6 +4329,7 @@ impl AssetViewApp {
                 .with_decorations(false)
                 .with_resizable(false)
                 .with_taskbar(false)
+                .with_window_level(egui::WindowLevel::Normal)
                 .with_inner_size([strip_w, strip_h])
                 .with_position(pos)
         } else {
@@ -4230,6 +4338,7 @@ impl AssetViewApp {
                 .with_decorations(false)
                 .with_resizable(false)
                 .with_taskbar(false)
+                .with_window_level(egui::WindowLevel::Normal)
                 .with_inner_size([strip_w, strip_h])
         };
 
@@ -4239,6 +4348,52 @@ impl AssetViewApp {
             egui::CentralPanel::default()
                 .frame(egui::Frame::none().fill(egui::Color32::from_rgb(12, 12, 12)))
                 .show(ctx, |ui| {
+                    let key_left = ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft));
+                    let key_right = ctx.input(|i| i.key_pressed(egui::Key::ArrowRight));
+                    let scroll_delta = ctx.input_mut(|i| {
+                        let mut wheel_steps = 0.0_f32;
+                        i.events.retain(|event| match event {
+                            egui::Event::MouseWheel {
+                                unit,
+                                delta: wheel_delta,
+                                modifiers,
+                            } if !modifiers.ctrl && !modifiers.command => {
+                                wheel_steps += single_image_wheel_units(*unit, wheel_delta.y);
+                                false
+                            }
+                            _ => true,
+                        });
+                        wheel_steps
+                    });
+                    si_scroll_accum += scroll_delta;
+                    let mut scroll_prev = false;
+                    let mut scroll_next = false;
+                    while si_scroll_accum >= 1.0 {
+                        scroll_prev = true;
+                        si_scroll_accum -= 1.0;
+                    }
+                    while si_scroll_accum <= -1.0 {
+                        scroll_next = true;
+                        si_scroll_accum += 1.0;
+                    }
+
+                    let mut display_index = current;
+                    let go_prev = key_left || scroll_prev;
+                    let go_next = key_right || scroll_next;
+                    if go_prev || go_next {
+                        display_index = if go_prev { prev_index } else { next_index };
+                        selection_anim = Some(FilmstripSelectionAnim {
+                            from_index: current,
+                            to_index: display_index,
+                            started_at: Instant::now(),
+                        });
+                        selection_anim_needs_repaint = true;
+                        navigate_to = Some(display_index);
+                    }
+
+                    let current_path = images[display_index].clone();
+                    let current_is_video = is_video(&current_path);
+
                     if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                         close_single_image = true;
                         return;
@@ -4270,14 +4425,19 @@ impl AssetViewApp {
                         ok
                     };
 
-                    navigate_to = draw_single_image_filmstrip(
+                    let clicked_to = draw_single_image_filmstrip(
                         ui,
                         &self.all_image_labels_short18,
                         &strip_indices,
                         &strip_textures,
-                        current,
+                        display_index,
+                        previous_index,
+                        selection_t,
                         &self.theme,
                     );
+                    if navigate_to.is_none() {
+                        navigate_to = clicked_to;
+                    }
 
                     if key_copy {
                         let _ = copy_current(frame);
@@ -4291,12 +4451,29 @@ impl AssetViewApp {
             return;
         }
 
+        selection_anim_needs_repaint |=
+            selection_anim.as_ref().is_some_and(|anim| !anim.finished());
+        if selection_anim
+            .as_ref()
+            .is_some_and(FilmstripSelectionAnim::finished)
+        {
+            selection_anim = None;
+        }
+        if selection_anim_needs_repaint {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
+
+        self.filmstrip_selection_anim = selection_anim;
+        self.filmstrip_selection_last_index = Some(current);
+
+        self.si_scroll_accum = si_scroll_accum;
         if let Some(new_idx) = navigate_to {
             if let Some(si) = &mut self.single_image {
                 si.index = new_idx;
                 si.tex = None;
                 si.path = None;
             }
+            self.filmstrip_selection_last_index = Some(new_idx);
             ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
         }
     }
@@ -4607,6 +4784,13 @@ impl eframe::App for AssetViewApp {
             self.tick_thumbnail_scroll_decay(ctx);
         }
         self.poll_watcher();
+
+        let root_viewport_focused = ctx.input(|i| i.viewport().focused.unwrap_or(false));
+        if root_viewport_focused && !self.root_viewport_focused && self.single_image.is_some() {
+            ctx.send_viewport_cmd_to(filmstrip_viewport_id(), egui::ViewportCommand::Focus);
+        }
+        self.root_viewport_focused = root_viewport_focused;
+
         if self.slideshow.is_some() && Self::slideshow_activity_detected(ctx) {
             self.note_slideshow_activity(ctx);
         }
