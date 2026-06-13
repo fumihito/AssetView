@@ -734,10 +734,8 @@ fn draw_single_image_filmstrip(
         let focus_rect =
             egui::Rect::from_center_size(item_rect.center(), item_rect.size() * focus_scale);
 
-        ui.painter()
-            .rect_filled(item_rect, 2.0, egui::Color32::from_gray(25));
         if let Some(tex) = tex_opt {
-            draw_centered(ui, tex, focus_rect);
+            draw_contained(ui, tex, focus_rect);
         }
         if selection_strength > 0.0 {
             let alpha = (selection_strength.clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -958,9 +956,10 @@ fn display_label_for_path(path: &Path, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_image, is_video, rgba_to_bgra_in_place, scan_folder, single_image_wheel_units,
-        thumbnail_scroll_accel_multiplier, thumbnail_scroll_streak_after_decay, truncate,
-        THUMBNAIL_SCROLL_ACCEL_FLAT_BUMP, THUMBNAIL_SCROLL_ACCEL_MAX,
+        contain_thumbnail_rect, is_image, is_video, rgba_to_bgra_in_place, scan_folder,
+        single_image_wheel_units, thumbnail_scroll_accel_multiplier,
+        thumbnail_scroll_streak_after_decay, truncate, THUMBNAIL_SCROLL_ACCEL_FLAT_BUMP,
+        THUMBNAIL_SCROLL_ACCEL_MAX,
     };
     use std::path::Path;
 
@@ -978,6 +977,19 @@ mod tests {
         assert_eq!(truncate("abcdef", 4), "abc…");
         assert_eq!(truncate("あいうえお", 3), "あい…");
         assert_eq!(truncate("ok", 4), "ok");
+    }
+
+    #[test]
+    fn contains_thumbnail_rect_without_letterboxing() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 100.0));
+
+        let wide = contain_thumbnail_rect(egui::vec2(200.0, 100.0), rect);
+        assert_eq!(wide.min, egui::pos2(0.0, 25.0));
+        assert_eq!(wide.max, egui::pos2(100.0, 75.0));
+
+        let tall = contain_thumbnail_rect(egui::vec2(100.0, 200.0), rect);
+        assert_eq!(tall.min, egui::pos2(25.0, 0.0));
+        assert_eq!(tall.max, egui::pos2(75.0, 100.0));
     }
 
     #[test]
@@ -3692,10 +3704,8 @@ impl AssetViewApp {
                             });
 
                             if ui.is_rect_visible(rect) {
-                                ui.painter()
-                                    .rect_filled(rect, 0.0, egui::Color32::from_gray(30));
                                 match thumbs.get(path) {
-                                    Some(ThumbState::Ready(tex)) => draw_centered(ui, tex, rect),
+                                    Some(ThumbState::Ready(tex)) => draw_contained(ui, tex, rect),
                                     Some(ThumbState::Failed) => {
                                         ui.painter().text(
                                             rect.center(),
@@ -5191,16 +5201,30 @@ fn is_windows_drive_root(path: &Path) -> bool {
     cfg!(windows) && path.to_string_lossy().ends_with(":\\")
 }
 
-fn draw_centered(ui: &Ui, tex: &egui::TextureHandle, rect: egui::Rect) {
-    let ts = tex.size_vec2();
-    let side = rect.width().min(rect.height());
-    let scale = (side / ts.x).min(side / ts.y);
-    let disp = ts * scale;
-    let off = (rect.size() - disp) * 0.5;
-    let img_rect = egui::Rect::from_min_size(rect.min + off, disp);
+fn contain_thumbnail_rect(ts: egui::Vec2, rect: egui::Rect) -> egui::Rect {
+    if ts.x <= 0.0 || ts.y <= 0.0 || rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return rect;
+    }
+
+    let tex_aspect = ts.x / ts.y;
+    let rect_aspect = rect.width() / rect.height();
+    if tex_aspect > rect_aspect {
+        let disp_w = rect.width();
+        let disp_h = disp_w / tex_aspect;
+        let y = rect.center().y - disp_h * 0.5;
+        egui::Rect::from_min_size(egui::pos2(rect.min.x, y), egui::vec2(disp_w, disp_h))
+    } else {
+        let disp_h = rect.height();
+        let disp_w = disp_h * tex_aspect;
+        let x = rect.center().x - disp_w * 0.5;
+        egui::Rect::from_min_size(egui::pos2(x, rect.min.y), egui::vec2(disp_w, disp_h))
+    }
+}
+
+fn draw_contained(ui: &Ui, tex: &egui::TextureHandle, rect: egui::Rect) {
     ui.painter().image(
         tex.id(),
-        img_rect,
+        contain_thumbnail_rect(tex.size_vec2(), rect),
         egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
         egui::Color32::WHITE,
     );
